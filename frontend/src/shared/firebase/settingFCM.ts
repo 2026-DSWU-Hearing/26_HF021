@@ -7,7 +7,7 @@ import { getMessaging, getToken } from 'firebase/messaging';
 // Your web app's Firebase configuration
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  apiKey: 'AIzaSyA595WdrcLDjSbRs8Z027MvvUpPaUV-Tz0',
   authDomain: 'hearing-18944.firebaseapp.com',
   projectId: 'hearing-18944',
   storageBucket: 'hearing-18944.firebasestorage.app',
@@ -46,12 +46,9 @@ const waitForServiceWorkerActivation = (registration: ServiceWorkerRegistration)
 const registerFcmServiceWorker = async () => {
   if (!('serviceWorker' in navigator)) return undefined;
 
-  const registration = await navigator.serviceWorker.register(
-    `/firebase-messaging-sw.js?apiKey=${encodeURIComponent(firebaseConfig.apiKey ?? '')}`,
-    {
-      scope: FCM_SW_SCOPE,
-    },
-  );
+  const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js', {
+    scope: FCM_SW_SCOPE,
+  });
 
   // register()는 등록만 보장하고 활성화는 보장하지 않는다.
   // getToken의 push 구독은 active SW가 필요하므로 활성화될 때까지 기다린다.

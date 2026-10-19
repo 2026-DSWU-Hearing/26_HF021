@@ -4,10 +4,10 @@
 importScripts('https://www.gstatic.com/firebasejs/12.14.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/12.14.0/firebase-messaging-compat.js');
 
-// Firebase 웹 API 키는 VITE_FIREBASE_API_KEY에서 SW 등록 URL로 전달한다.
-// 서버 비밀키나 서비스 계정 인증정보를 이곳에 넣지 않는다.
+// SW는 환경변수를 읽지 못하므로 config를 하드코딩한다.
+// Firebase 웹 config는 클라이언트 식별자이며 공개되어도 보안상 문제없다.
 firebase.initializeApp({
-  apiKey: new URL(self.location.href).searchParams.get('apiKey') ?? '',
+  apiKey: 'AIzaSyA595WdrcLDjSbRs8Z027MvvUpPaUV-Tz0',
   authDomain: 'hearing-18944.firebaseapp.com',
   projectId: 'hearing-18944',
   storageBucket: 'hearing-18944.firebasestorage.app',
