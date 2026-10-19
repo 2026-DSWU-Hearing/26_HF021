@@ -1,0 +1,115 @@
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import NotFoundException, ValidationException
+from app.db.functions import get_or_404, get_owned_or_403
+from app.models.mode import Mode, ModeSound
+
+MAX_MODES_PER_USER = 6
+MIN_SOUNDS_PER_MODE = 1
+
+
+async def list_modes(db: AsyncSession, user_id: int) -> list[Mode]:
+    result = await db.execute(select(Mode).where(Mode.user_id == user_id).order_by(Mode.created_at))
+    return list(result.scalars().all())
+
+
+async def get_mode(db: AsyncSession, user_id: int, mode_id: int) -> Mode:
+    """소유한 모드 단건 조회(상세). sound_links/sound/category는 eager 로드됨."""
+    return await _get_owned_mode(db, user_id, mode_id)
+
+
+async def get_active_mode(db: AsyncSession, user_id: int) -> Mode | None:
+    result = await db.execute(select(Mode).where(Mode.user_id == user_id, Mode.is_active.is_(True)))
+    return result.scalar_one_or_none()
+
+
+async def create_mode(db: AsyncSession, user_id: int, name: str, icon: str, sound_ids: list[int]) -> Mode:
+    existing = await db.execute(select(Mode.id).where(Mode.user_id == user_id))
+    if len(list(existing.scalars().all())) >= MAX_MODES_PER_USER:
+        raise ValidationException(f"Maximum {MAX_MODES_PER_USER} modes allowed")
+    if len(sound_ids) < MIN_SOUNDS_PER_MODE:
+        raise ValidationException(f"At least {MIN_SOUNDS_PER_MODE} sound required")
+
+    mode = Mode(user_id=user_id, name=name, icon=icon, is_active=False)
+    for sid in sound_ids:
+        mode.sound_links.append(ModeSound(sound_id=sid))
+    db.add(mode)
+    await db.commit()
+    return await get_or_404(db, Mode, mode.id)
+
+
+async def update_mode(
+    db: AsyncSession, user_id: int, mode_id: int, name: str, icon: str, sound_ids: list[int]
+) -> Mode:
+    """프론트 PUT 계약: 이름/아이콘/소리 목록을 통째로 교체한다(부분 수정 아님)."""
+    if len(sound_ids) < MIN_SOUNDS_PER_MODE:
+        raise ValidationException(f"At least {MIN_SOUNDS_PER_MODE} sound required")
+    mode = await _get_owned_mode(db, user_id, mode_id)
+    mode.name = name
+    mode.icon = icon
+    await _set_sound_links(db, mode, sound_ids)
+    await db.commit()
+    return await get_or_404(db, Mode, mode.id)
+
+
+async def delete_mode(db: AsyncSession, user_id: int, mode_id: int) -> None:
+    mode = await _get_owned_mode(db, user_id, mode_id)
+    await db.delete(mode)
+    await db.commit()
+
+
+async def activate_mode(db: AsyncSession, user_id: int, mode_id: int) -> Mode:
+    mode = await _get_owned_mode(db, user_id, mode_id)
+    await db.execute(
+        update(Mode).where(Mode.user_id == user_id, Mode.id != mode_id).values(is_active=False)
+    )
+    mode.is_active = True
+    await db.commit()
+    return await get_or_404(db, Mode, mode.id)
+
+
+async def update_mode_sounds(db: AsyncSession, user_id: int, mode_id: int, sound_ids: list[int]) -> Mode:
+    if len(sound_ids) < MIN_SOUNDS_PER_MODE:
+        raise ValidationException(f"At least {MIN_SOUNDS_PER_MODE} sound required")
+    mode = await _get_owned_mode(db, user_id, mode_id)
+    await _set_sound_links(db, mode, sound_ids)
+    await db.commit()
+    return await get_or_404(db, Mode, mode.id)
+
+
+async def set_mode_sound_active(
+    db: AsyncSession, user_id: int, mode_id: int, sound_id: int, is_active: bool
+) -> None:
+    """모드 안의 소리 1건 on/off 토글(off=감지/알림 제외). 모드에 없는 소리면 404."""
+    mode = await _get_owned_mode(db, user_id, mode_id)
+    link = next((ms for ms in mode.sound_links if ms.sound_id == sound_id), None)
+    if link is None:
+        raise NotFoundException("Sound not in this mode")
+    link.is_active = is_active
+    await db.commit()
+
+
+async def _get_owned_mode(db: AsyncSession, user_id: int, mode_id: int) -> Mode:
+    return await get_owned_or_403(db, Mode, mode_id, user_id)
+
+
+async def _set_sound_links(db: AsyncSession, mode: Mode, sound_ids: list[int]) -> None:
+    """모드의 소리 목록을 sound_ids 에 맞춘다 — 바뀐 부분만 반영.
+
+    전부 지우고 새로 만들면 사용자가 꺼둔 소리(ModeSound.is_active=False)가 기본값 True 로
+    되살아난다(FE 버그리포트: 이름만 고쳐도 꺼둔 소리가 다시 켜짐). 그래서
+      - 이미 있던 sound_id → 기존 링크를 그대로 둔다(is_active 유지, DELETE/INSERT 없음)
+      - 요청에서 빠진 sound_id → 링크 제거(delete-orphan)
+      - 새 sound_id → 링크 추가(기본 on)
+    유지되는 링크를 재삽입하지 않으므로 uq_mode_sound 충돌도 생기지 않는다.
+    """
+    wanted = list(dict.fromkeys(sound_ids))  # 중복 제거(같은 id 두 번이면 uq 위반), 순서 유지
+    existing = {link.sound_id: link for link in mode.sound_links}
+
+    for sid, link in existing.items():
+        if sid not in wanted:
+            mode.sound_links.remove(link)
+    for sid in wanted:
+        if sid not in existing:
+            mode.sound_links.append(ModeSound(sound_id=sid))

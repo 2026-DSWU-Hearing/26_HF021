@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: hearing
+      POSTGRES_PASSWORD: hearing
+      POSTGRES_DB: hearing
+    ports:
+      - "5433:5432"
+    volumes:
+      - hearing_pg:/var/lib/postgresql/data
+
+  # 인메모리-임시 저장소 (게스트 rate limit, refresh 토큰 블랙리스트).
+  # 데이터가 전부 TTL 임시라 볼륨 없음 — 재시작하면 비워지는 게 정상.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  hearing_pg:

@@ -1,0 +1,48 @@
+from sqlalchemy import Boolean, Integer, String, false, true
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db.base import Base, TimestampMixin
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
+
+    nickname: Mapped[str] = mapped_column(String(50), nullable=False)
+    disability_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # 기기 이름은 계정별 데이터 — 물리 기기(devices)는 1행뿐이라 각자 자기가 지은 이름으로 본다.
+    # NULL 이면 기본 표시명(device_service.DEFAULT_DEVICE_NICKNAME)으로 응답한다.
+    device_nickname: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    haptic_strength: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    do_not_disturb: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    push_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+
+    # "긴급 소리 알림 받기" — 켜면 넥밴드 온디바이스 AI 동작 + 긴급 카테고리는 모드 필터 없이 알림.
+    # 꺼면 기기 내 선판정이 멈추고 긴급도 다른 소리처럼 활성 모드에 있어야 알림이 간다.
+    # 기본값은 펌웨어 기본값과 같은 true.
+    emergency_alert_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
+
+    fcm_token: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    is_google_user: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    google_sub: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+
+    terms_agreed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 위치정보 이용 동의. 양방향 소통 모달·온보딩에서 받는다. 동의 여부의 정본은 서버다 —
+    # localStorage 에 두면 기기를 바꾸거나 캐시를 지우면 사라져 모달이 다시 뜬다.
+    # 게스트도 False: 실제로 동의한 것만 True (데모 동선에서 모달이 한 번 뜬다).
+    location_agreed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="false")

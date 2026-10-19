@@ -1,0 +1,46 @@
+from fastapi import APIRouter, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.dependencies import get_current_user_id, get_db
+from app.schemas.sound import (
+    CategoryItem,
+    CategoryListResponse,
+    SoundItem,
+    SoundListResponse,
+)
+from app.services import sound_service
+
+router = APIRouter()
+
+
+@router.get("/categories", response_model=CategoryListResponse)
+async def list_categories(_: int = Depends(get_current_user_id), db: AsyncSession = Depends(get_db)):
+    categories = await sound_service.list_categories(db)
+    return CategoryListResponse(
+        categories=[
+            CategoryItem(category_id=c.id, name=c.name)
+            for c in categories
+        ]
+    )
+
+
+@router.get("", response_model=SoundListResponse)
+async def list_sounds(
+    category_id: int | None = None,
+    keyword: str | None = None,
+    _: int = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    sounds = await sound_service.list_sounds(db, category_id, keyword)
+    return SoundListResponse(
+        sounds=[
+            SoundItem(
+                sound_id=s.id,
+                name=s.name,
+                category_id=s.category_id,
+                category_name=s.category.name,
+                icon_key=s.icon,
+            )
+            for s in sounds
+        ]
+    )

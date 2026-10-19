@@ -1,0 +1,72 @@
+from fastapi import APIRouter, Query, WebSocket
+
+from app.core.exceptions import AuthException
+from app.core.security import DEVICE_WS_SOURCES, USER_ACCESS_SOURCES, decode_access_token
+from app.websocket import device_handler
+from app.websocket.detection_handler import handle_detection_socket
+from app.websocket.livesound_handler import handle_livesound_socket
+from app.websocket.stt_handler import handle_stt_socket, resolve_conversation_close_code
+
+router = APIRouter()
+
+
+async def _reject(ws: WebSocket, code: int) -> None:
+    """핸드셰이크를 수락한 직후 지정 코드로 닫는다.
+    accept 전에 close 하면 uvicorn 이 HTTP 403 으로 핸드셰이크를 거부해서
+    실제 클라이언트(브라우저·ESP32)는 close 코드를 영영 못 받는다."""
+    await ws.accept()
+    await ws.close(code=code)
+
+
+@router.websocket("/ws/users/me/detections")
+async def ws_detections(ws: WebSocket, token: str = Query(...)):
+    try:
+        claims = decode_access_token(token, USER_ACCESS_SOURCES)
+    except AuthException:
+        await _reject(ws, 4401)
+        return
+    await handle_detection_socket(ws, claims.user_id)
+
+
+@router.websocket("/ws/users/me/livesound")
+async def ws_livesound(ws: WebSocket, token: str = Query(...)):
+    """실시간 소리 감지 화면 전용 — 클라이언트 마이크 PCM 을 AI 분석 서버로 릴레이한다.
+    감지 흐름(/ws/users/me/detections)과 무관: 저장·알림·진동·모드 필터가 전부 없다."""
+    try:
+        claims = decode_access_token(token, USER_ACCESS_SOURCES)
+    except AuthException:
+        await _reject(ws, 4401)
+        return
+    await handle_livesound_socket(ws, claims.user_id)
+
+
+@router.websocket("/ws/conversations/{conversation_id}/stt")
+async def ws_stt(ws: WebSocket, conversation_id: int, token: str = Query(...)):
+    """양방향 소통 화면 전용 — 클라이언트 마이크 PCM 을 RTZR 로 중계하고 인식 텍스트를 돌려준다.
+    저장·알림 없음. 확정 문장은 FE 가 쌓았다가 POST /api/conversations/{id}/end 로 올린다."""
+    try:
+        claims = decode_access_token(token, USER_ACCESS_SOURCES)
+    except AuthException:
+        await _reject(ws, 4401)
+        return
+    close_code = await resolve_conversation_close_code(claims.user_id, conversation_id)
+    if close_code is not None:
+        await _reject(ws, close_code)  # 4404 내 대화 아님 / 4409 이미 종료
+        return
+    await handle_stt_socket(ws, claims.user_id, conversation_id)
+
+
+@router.websocket("/ws/devices")
+async def ws_devices(ws: WebSocket, token: str = Query(...), mac: str = Query(...)):
+    """하드웨어(ESP32) 상태/명령 채널. token 은 정품 기기 증명, 기기 식별은 MAC.
+    실물 기기는 여러 계정이 공유하므로 이 연결 하나가 그 MAC 의 모든 계정 상태를 갱신한다."""
+    try:
+        decode_access_token(token, DEVICE_WS_SOURCES)
+    except AuthException:
+        await _reject(ws, 4401)
+        return
+    registered_mac = await device_handler.resolve_registered_mac(mac)
+    if registered_mac is None:
+        await _reject(ws, 4404)  # 미등록 MAC
+        return
+    await device_handler.handle_device_socket(ws, registered_mac)

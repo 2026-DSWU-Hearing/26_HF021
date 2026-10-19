@@ -1,0 +1,60 @@
+// 이 파일은 Service Worker로 동작하므로 번들러(Vite)를 거치지 않는 정적 파일이다.
+// 따라서 import.meta.env / ES module import를 쓸 수 없고, compat SDK를 importScripts로 불러온다.
+// SDK 버전은 package.json의 firebase 버전(12.14.0)과 반드시 일치시킨다.
+importScripts('https://www.gstatic.com/firebasejs/12.14.0/firebase-app-compat.js');
+importScripts('https://www.gstatic.com/firebasejs/12.14.0/firebase-messaging-compat.js');
+
+// Firebase 웹 API 키는 VITE_FIREBASE_API_KEY에서 SW 등록 URL로 전달한다.
+// 서버 비밀키나 서비스 계정 인증정보를 이곳에 넣지 않는다.
+firebase.initializeApp({
+  apiKey: new URL(self.location.href).searchParams.get('apiKey') ?? '',
+  authDomain: 'hearing-18944.firebaseapp.com',
+  projectId: 'hearing-18944',
+  storageBucket: 'hearing-18944.firebasestorage.app',
+  messagingSenderId: '931196004064',
+  appId: '1:931196004064:web:e0da310d3c73ea3b235285',
+});
+
+const messaging = firebase.messaging();
+
+// 감지 방향 표시 문구. src/shared/constants/detectionDirection.ts와 같은 표다
+// (서비스워커는 번들 밖이라 import할 수 없어 복제한다). 문구를 바꾸면 양쪽을 함께 고친다.
+// UNKNOWN은 표시하지 않으므로 항목을 두지 않는다.
+const DETECTION_DIRECTION_LABEL = {
+  FRONT: '앞',
+  BACK: '뒤',
+  LEFT: '왼쪽',
+  RIGHT: '오른쪽',
+};
+
+// 앱이 백그라운드(탭 비활성/닫힘) 상태일 때 도착하는 푸시 메시지를 처리한다.
+// notification 페이로드는 브라우저가 자동 표시하므로 수동으로 다시 띄우지 않는다.
+// data-only 페이로드만 직접 표시해 두 형식을 모두 지원하면서 중복 알림을 방지한다.
+// 서버는 방향을 body 문장에 섞지 않고 data.direction으로 따로 내리며, 문구 조립은 여기서 한다.
+messaging.onBackgroundMessage((payload) => {
+  if (payload.notification) return;
+
+  const { title, body, direction } = payload.data ?? {};
+  const directionLabel = DETECTION_DIRECTION_LABEL[direction];
+  self.registration.showNotification(title ?? '알림', {
+    body: directionLabel ? `${body} · ${directionLabel}` : body,
+    icon: '/icons/web-app-manifest-192x192.png',
+  });
+});
+
+// 사용자가 알림을 클릭하면 앱을 연다.
+// 이미 열린 앱 탭이 있으면 그 탭에 focus하고, 없으면 새 창을 연다.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+
+  // waitUntil로 SW가 작업을 끝낼 때까지 살아있게 한다(안 하면 중간에 종료될 수 있다).
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      // 이 origin으로 이미 열린 탭이 있으면 새로 열지 않고 그 탭을 포커스한다.
+      // startsWith로 검사해 URL 시작이 정확히 이 origin인 탭만 매칭한다(includes는 중간에 끼어도 매칭됨).
+      const existingClient = clientList.find((client) => client.url.startsWith(self.location.origin));
+      if (existingClient) return existingClient.focus();
+      return self.clients.openWindow('/');
+    }),
+  );
+});

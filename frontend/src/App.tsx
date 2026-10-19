@@ -1,0 +1,151 @@
+import { useEffect } from 'react';
+import { useLocation } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
+
+import BottomNavigation from '@/layout/BottomNavigation';
+import { NOTIFICATION_QUERY_KEY } from '@/pages/home/constants/notificationConstants';
+import {
+  isNotificationInfiniteData,
+  mergeNotificationIntoCache,
+} from '@/pages/home/utils/notificationCache';
+import AppRouter from '@/routes/AppRouter';
+import { isNotFoundPath } from '@/routes/appRoutes';
+import { getAccessToken } from '@/pages/login/utils/tokenStorage';
+import { useToast } from '@/shared/components/toast/ToastContext';
+import { isNotificationSupported } from '@/shared/firebase/settingFCM';
+import { useDetectionSocket } from '@/shared/hooks/useDetectionSocket';
+import { useFcmForegroundMessage } from '@/shared/hooks/useFcmForegroundMessage';
+import { useFcmTokenSync } from '@/shared/hooks/useFcmTokenSync';
+import { useDetectionStore } from '@/shared/stores/useDetectionStore';
+import { useLocationConsentStore } from '@/shared/stores/useLocationConsentStore';
+import { useBottomNavigationStore } from '@/shared/stores/useBottomNavigationStore';
+import '@/App.css';
+
+import type { NotificationInfiniteDataTypes } from '@/pages/home/types/notificationTypes';
+import type { UserTypes } from '@/shared/types/userTypes';
+
+const App = () => {
+  const { pathname } = useLocation();
+  const isHiddenByModal = useBottomNavigationStore(
+    (state) => state.isHiddenByModal,
+  );
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+
+  // 로그인 성공 시 useGoogleAuth가 navigate('/')로 주소를 바꾸면 App이 리렌더되고,
+  // 이때 토큰을 다시 읽어 useDetectionSocket에 넘겨 로그인 직후 WS 연결이 트리거된다.
+  // (localStorage는 반응형이 아니라 라우트 변경을 신호로 삼는다.)
+  const accessToken = getAccessToken();
+  const pushDetection = useDetectionStore((state) => state.pushDetection);
+  const resetLocationPrompt = useLocationConsentStore(
+    (state) => state.resetPrompt,
+  );
+
+  useEffect(() => {
+    if (!pathname.startsWith('/communication')) resetLocationPrompt();
+  }, [pathname, resetLocationPrompt]);
+
+  const { isFcmTokenSynced } = useFcmTokenSync();
+  // 포그라운드 FCM(Android/PC에서 SDK가 배너 대신 페이지로 넘긴 푸시)은 토스트로 띄운다.
+  useFcmForegroundMessage();
+
+  // 감지 1건에 서버는 WS 메시지와 FCM 푸시를 둘 다 보낸다. 표시는 한 경로만 맡는다:
+  // - 푸시가 켜져 있으면 FCM 경로(백그라운드·iOS는 배너, Android/PC 포그라운드는 onMessage 토스트).
+  //   iOS 홈 화면 앱은 SW가 앱 창을 못 찾아 앱 이용 중에도 배너를 띄우므로, WS 토스트까지 띄우면 중복된다.
+  // - 푸시가 꺼져 있거나 권한이 없으면 FCM이 오지 않으므로 WS 토스트로 띄운다.
+  // WS는 표시와 무관하게 항상 스토어(실시간 감지 페이지)와 알림 목록 캐시를 갱신한다.
+  const isPushActive = () => {
+    const user = queryClient.getQueryData<UserTypes>(['users', 'me']);
+    // 캐시가 없으면(아직 내 정보를 안 불러옴) 푸시 여부를 모르므로 토스트를 띄우는 쪽을 택한다.
+    return (
+      isNotificationSupported() &&
+      Notification.permission === 'granted' &&
+      Boolean(user?.push_enabled) &&
+      isFcmTokenSynced
+    );
+  };
+
+  useDetectionSocket({
+    token: accessToken,
+    onDetection: (detection) => {
+      if (!isPushActive()) {
+        showToast({
+          soundName: detection.sound_name,
+          categoryName: detection.sound_category,
+          direction: detection.direction,
+        });
+      }
+      pushDetection(detection);
+
+      // 알림 목록을 한 번이라도 조회한 경우에만 실시간 이벤트를 병합한다.
+      // 아직 생성되지 않은 캐시는 WS 이벤트 하나로 불완전하게 만들지 않는다.
+      const notificationQueryState =
+        queryClient.getQueryState<NotificationInfiniteDataTypes>(
+          NOTIFICATION_QUERY_KEY,
+        );
+      if (!notificationQueryState) return;
+
+      // 무한 조회가 시작할 때 캡처한 이전 pages로 WS 병합 결과를 덮어쓰지
+      // 않도록 진행 중 요청을 취소한 뒤 최신 캐시에 이벤트를 합친다.
+      void queryClient
+        .cancelQueries({ queryKey: NOTIFICATION_QUERY_KEY, exact: true })
+        .then(() => {
+          const notificationCache =
+            queryClient.getQueryData<NotificationInfiniteDataTypes>(
+              NOTIFICATION_QUERY_KEY,
+            );
+
+          if (isNotificationInfiniteData(notificationCache)) {
+            queryClient.setQueryData<NotificationInfiniteDataTypes>(
+              NOTIFICATION_QUERY_KEY,
+              (data) =>
+                data ? mergeNotificationIntoCache(data, detection) : data,
+            );
+            return;
+          }
+
+          if (notificationCache) {
+            // HMR이나 과거 구현에서 같은 키에 다른 캐시 구조가 남은 경우
+            // 잘못된 데이터를 폐기하고 Infinite Query 첫 페이지부터 다시 받는다.
+            void queryClient.resetQueries({
+              queryKey: NOTIFICATION_QUERY_KEY,
+              exact: true,
+            });
+            return;
+          }
+
+          // 최초 조회 중 이벤트가 도착해 아직 data가 없다면 서버 저장분을
+          // 놓치지 않도록 활성 쿼리를 처음부터 다시 요청한다.
+          void queryClient.invalidateQueries({
+            queryKey: NOTIFICATION_QUERY_KEY,
+            exact: true,
+            refetchType: 'active',
+          });
+        });
+    },
+  });
+
+  // 모드쪽 설정 페이지, 설정 하위 서브페이지, 알림 페이지에서는 네비게이션 숨김
+  // ('/setting' 메인은 '/setting/'에 걸리지 않아 탭바가 유지된다)
+  // 알림 페이지는 TopNavigation으로 진입/뒤로가기 하는 서브 페이지라 탭바를 숨긴다
+  // (어떤 탭도 active가 되지 않는 어정쩡한 상태를 방지).
+  // 404 페이지도 같은 이유(active 탭 없음)로 숨기고, 자체 "홈으로" 버튼으로 복귀시킨다.
+  const hideNavigation =
+    isHiddenByModal ||
+    pathname === '/communication/histories' ||
+    pathname.startsWith('/communication/histories/') ||
+    pathname.startsWith('/modes/') ||
+    pathname.startsWith('/setting/') ||
+    pathname.startsWith('/onboarding') ||
+    pathname === '/notifications' ||
+    isNotFoundPath(pathname);
+
+  return (
+    <div className="app">
+      <AppRouter />
+      {!hideNavigation && <BottomNavigation />}
+    </div>
+  );
+};
+
+export default App;

@@ -1,0 +1,81 @@
+import asyncio
+from contextlib import asynccontextmanager, suppress
+
+from fastapi import FastAPI
+
+from app.core.config import settings
+from app.core.handlers import register_exception_handlers
+from app.core.logger import logger
+from app.core.middleware import setup_middleware
+from app.api import (
+    auth,
+    conversations,
+    devices,
+    modes,
+    notifications,
+    quick_replies,
+    sounds,
+    users,
+    websocket,
+)
+from app.db.session import AsyncSessionLocal
+from app.services.conversation_service import run_unended_cleanup_loop
+from app.services.device_service import ensure_physical_device
+from app.websocket.device_handler import reset_all_connections
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 물리 기기 행(1개)을 보장한다 — [기기 연결]·GET /devices·감지 라우팅의 전제.
+    # DB 미기동 등으로 실패해도 기동은 계속한다(조회 경로의 ensure 가 자가 치유).
+    try:
+        async with AsyncSessionLocal() as db:
+            await ensure_physical_device(db)
+    except Exception as e:
+        logger.warning("startup physical device ensure skipped: %s", e)
+    # WS 는 서버 재시작을 살아남지 못하므로 부팅 직후엔 연결된 기기가 없는 게 진실 —
+    # 크래시·과거 데이터로 남은 is_connected=true 를 리셋한다(기기 상태의 진실 원천은 WS 수명주기).
+    await reset_all_connections()
+    # 종료 못 한 채 남은 대화 정리(conversation_service.run_unended_cleanup_loop).
+    cleanup_task = asyncio.create_task(run_unended_cleanup_loop())
+    yield
+    cleanup_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await cleanup_task
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="HEARING-BE", version="0.1.0", lifespan=lifespan)
+
+    # prod 에서는 config validator 가 기동을 막지만, dev 에서도 켜져 있음을 부팅 로그로 상기시킨다.
+    if settings.DEV_AUTH_BYPASS:
+        logger.warning(
+            "DEV_AUTH_BYPASS is ON — tokenless requests run as user id=%s. Never use outside local dev.",
+            settings.DEV_USER_ID,
+        )
+
+    setup_middleware(app)
+    register_exception_handlers(app)
+
+    app.include_router(auth.router, prefix="/auth", tags=["auth"])
+    app.include_router(users.router, prefix="/users", tags=["users"])
+    # 전 API 루트 경로(prefix 없음). FE가 modes/sounds 호출에서 /api/v1 을 제거(HEARING-FE 7fd26cc)함에
+    # 따라 백엔드도 맞춤 — 이제 앱 API와 흐름 A(devices/notifications/websocket) 모두 루트로 통일.
+    app.include_router(modes.router, prefix="/modes", tags=["modes"])
+    app.include_router(sounds.router, prefix="/sounds", tags=["sounds"])
+    app.include_router(devices.router, prefix="/devices", tags=["devices"])
+    app.include_router(notifications.router, prefix="/notifications", tags=["notifications"])
+    # 양방향 소통 API 만 /api 프리픽스 — FE 가 이 둘을 /api/... 로 하드코딩했다
+    # (HEARING-FE conversationApi.ts · quickReplyApi.ts). 나머지 루트 경로와의 불일치는 FE 에 전달함.
+    app.include_router(conversations.router, prefix="/api/conversations", tags=["conversations"])
+    app.include_router(quick_replies.router, prefix="/api/quick-replies", tags=["quick-replies"])
+    app.include_router(websocket.router, tags=["websocket"])
+
+    @app.get("/health")
+    async def health():
+        return {"status": "ok"}
+
+    return app
+
+
+app = create_app()
